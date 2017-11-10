@@ -571,6 +571,31 @@ type Command interface {
 
 ====================================================================================
 
+vi ./juju/juju/cmd/juju/cloud/add.go
+
+// AddCloudCommand is the command that allows you to add a cloud configuration
+// for use with juju bootstrap.
+type AddCloudCommand struct {
+        cmd.CommandBase
+
+        // Replace, if true, existing cloud information is overwritten.
+        Replace bool
+
+        // Cloud is the name fo the cloud to add.
+        Cloud string
+
+        // CloudFile is the name of the cloud YAML file.
+        CloudFile string
+
+        // Ping contains the logic for pinging a cloud endpoint to know whether or
+        // not it really has a valid cloud of the same type as the provider.  By
+        // default it just calls the correct provider's Ping method.
+        Ping func(p environs.EnvironProvider, endpoint string) error
+
+        cloudMetadataStore CloudMetadataStore
+}
+
+
 
 juju/juju/cmd/juju/cloud/add.go
 
@@ -620,8 +645,245 @@ func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
         return addCloud(c.cloudMetadataStore, newCloud)
 }
 
+====================================================================================
+
+        specifiedClouds, err := c.cloudMetadataStore.ParseCloudMetadataFile(c.CloudFile)
+
+
+vi ./juju/juju/cmd/juju/cloud/add.go
+
+
+type CloudMetadataStore interface {
+        ParseCloudMetadataFile(path string) (map[string]cloud.Cloud, error)
+        ParseOneCloud(data []byte) (cloud.Cloud, error)
+        PublicCloudMetadata(searchPaths ...string) (result map[string]cloud.Cloud, fallbackUsed bool, _ error)
+        PersonalCloudMetadata() (map[string]cloud.Cloud, error)
+        WritePersonalCloudMetadata(cloudsMap map[string]cloud.Cloud) error
+}
 
 
 
+vi ./juju/juju/cloud/personalclouds.go
+
+import (
+        "io/ioutil"
+
+        "github.com/juju/juju/juju/osenv"
+
+
+// ParseCloudMetadataFile loads any cloud metadata defined
+// in the specified file.
+func ParseCloudMetadataFile(file string) (map[string]Cloud, error) {
+        data, err := ioutil.ReadFile(file)
+        if err != nil {
+                return nil, err
+        }
+        clouds, err := ParseCloudMetadata(data)
+        if err != nil {
+                return nil, err
+        }
+        return clouds, err
+}
+
+--------------------------------------------------------------
+
+cat​ ​ >>​ ​ ~/maas.yaml​ ​ <<​ ​ EOF
+clouds:/
+​ ​ maas:
+​ ​ ​ ​ type:​ ​ maas
+​ ​ ​ ​ auth-types:​ ​ [oauth1]
+​ ​ ​ ​ endpoint:​ ​ http://192.168.100.3/MAAS/
+EOF
+
+
+--------------------------------------------------------------
+
+
+./cloud/clouds.go
+
+        "gopkg.in/yaml.v2"
+
+
+// ParseCloudMetadata parses the given yaml bytes into Clouds metadata.
+func ParseCloudMetadata(data []byte) (map[string]Cloud, error) {
+        var metadata cloudSet
+        if err := yaml.Unmarshal(data, &metadata); err != nil {
+                return nil, errors.Annotate(err, "cannot unmarshal yaml cloud metadata")
+        }
+
+        // Translate to the exported type. For each cloud, we store
+        // the first region for the cloud as its default region.
+        clouds := make(map[string]Cloud)
+        for name, cloud := range metadata.Clouds {
+                details := cloudFromInternal(cloud)
+                details.Name = name
+                if details.Description == "" {
+                        var ok bool
+                        if details.Description, ok = defaultCloudDescription[name]; !ok {
+                                details.Description = defaultCloudDescription[cloud.Type]
+                        }
+                }
+                clouds[name] = details
+        }
+        return clouds, nil
+}
+
+
+
+func cloudFromInternal(in *cloud) Cloud {
+        var regions []Region
+        if len(in.Regions.Map) > 0 {
+                for _, item := range in.Regions.Slice {
+                        name := fmt.Sprint(item.Key)
+                        r := in.Regions.Map[name]
+                        if r == nil {
+                                // r will be nil if none of the fields in
+                                // the YAML are set.
+                                regions = append(regions, Region{Name: name})
+                        } else {
+                                regions = append(regions, Region{
+                                        name,
+                                        r.Endpoint,
+                                        r.IdentityEndpoint,
+                                        r.StorageEndpoint,
+                                })
+                        }
+                }
+        }
+        meta := Cloud{
+                Name:             in.Name,
+                Type:             in.Type,
+                AuthTypes:        in.AuthTypes,
+                Endpoint:         in.Endpoint,
+                IdentityEndpoint: in.IdentityEndpoint,
+                StorageEndpoint:  in.StorageEndpoint,
+                Regions:          regions,
+                Config:           in.Config,
+                RegionConfig:     in.RegionConfig,
+                Description:      in.Description,
+        }
+        meta.denormaliseMetadata()
+        return meta
+}
+
+
+func (cloud Cloud) denormaliseMetadata() {
+        for name, region := range cloud.Regions {
+                r := region
+                inherit(&r, &cloud)
+                cloud.Regions[name] = r
+        }
+}
+
+
+
+
+
+--------------------------------------------------------------
+
+../../../gopkg.in/yaml.v2/yaml.go
+
+func Unmarshal(in []byte, out interface{}) (err error) {
+        return unmarshal(in, out, false)
+}
+
+
+--------------------------------------------------------------
+
+./cloud/clouds.go
+
+// cloudSet contains cloud definitions, used for marshalling and
+// unmarshalling.
+type cloudSet struct {
+        // Clouds is a map of cloud definitions, keyed on cloud name.
+        Clouds map[string]*cloud `yaml:"clouds"`
+}
+
+--------------------------------------------------------------
+
+// cloud is equivalent to Cloud, for marshalling and unmarshalling.
+type cloud struct {
+        Name             string                 `yaml:"name,omitempty"`
+        Type             string                 `yaml:"type"`
+        Description      string                 `yaml:"description,omitempty"`
+        AuthTypes        []AuthType             `yaml:"auth-types,omitempty,flow"`
+        Endpoint         string                 `yaml:"endpoint,omitempty"`
+        IdentityEndpoint string                 `yaml:"identity-endpoint,omitempty"`
+        StorageEndpoint  string                 `yaml:"storage-endpoint,omitempty"`
+        Regions          regions                `yaml:"regions,omitempty"`
+        Config           map[string]interface{} `yaml:"config,omitempty"`
+        RegionConfig     RegionConfig           `yaml:"region-config,omitempty"`
+}
+
+
+// Cloud is a cloud definition.
+type Cloud struct {
+        // Name of the cloud.
+        Name string
+
+        // Type is the type of cloud, eg ec2, openstack etc.
+        // This is one of the provider names registered with
+        // environs.RegisterProvider.
+        Type string
+
+        // Description describes the type of cloud.
+        Description string
+
+        // AuthTypes are the authentication modes supported by the cloud.
+        AuthTypes AuthTypes
+
+        // Endpoint is the default endpoint for the cloud regions, may be
+        // overridden by a region.
+        Endpoint string
+
+        // IdentityEndpoint is the default identity endpoint for the cloud
+        // regions, may be overridden by a region.
+        IdentityEndpoint string
+
+        // StorageEndpoint is the default storage endpoint for the cloud
+        // regions, may be overridden by a region.
+        StorageEndpoint string
+
+        // Regions are the regions available in the cloud.
+        //
+        // Regions is a slice, and not a map, because order is important.
+        // The first region in the slice is the default region for the
+        // cloud.
+        Regions []Region
+
+        // Config contains optional cloud-specific configuration to use
+        // when bootstrapping Juju in this cloud. The cloud configuration
+        // will be combined with Juju-generated, and user-supplied values;
+        // user-supplied values taking precedence.
+        Config map[string]interface{}
+
+        // RegionConfig contains optional region specific configuration.
+        // Like Config above, this will be combined with Juju-generated and user
+        // supplied values; with user supplied values taking precedence.
+        RegionConfig RegionConfig
+}
+
+
+// Region is a cloud region.
+type Region struct {
+        // Name is the name of the region.
+        Name string
+
+        // Endpoint is the region's primary endpoint URL.
+        Endpoint string
+
+        // IdentityEndpoint is the region's identity endpoint URL.
+        // If the cloud/region does not have an identity-specific
+        // endpoint URL, this will be empty.
+        IdentityEndpoint string
+
+        // StorageEndpoint is the region's storage endpoint URL.
+        // If the cloud/region does not have a storage-specific
+        // endpoint URL, this will be empty.
+        StorageEndpoint string
+}
+
+
+--------------------------------------------------------------
 
 
