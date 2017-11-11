@@ -1,14 +1,14 @@
 
 
-cat​ ​ >>​ ​ ~/maas.yaml​ ​ <<​ ​ EOF
+cat >> ~/maas.yaml << EOF
 clouds:/
-​ ​ maas:
-​ ​ ​ ​ type:​ ​ maas
-​ ​ ​ ​ auth-types:​ ​ [oauth1]
-​ ​ ​ ​ endpoint:​ ​ http://192.168.100.3/MAAS/
+  maas:
+    type: maas
+    auth-types: [oauth1]
+    endpoint: http://192.168.100.3/MAAS/
 EOF
 
-juju​ ​ add-cloud​ ​ maas​ ​ ~/maas.yaml
+juju add-cloud maas ~/maas.yaml
 
 
 
@@ -606,7 +606,7 @@ func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
                 return c.runInteractive(ctxt)
         }
 
-        specifiedClouds, err := c.cloudMetadataStore.ParseCloudMetadataFile(c.CloudFile)
+        specifiedClouds, err := c.cloudMetadataStore.ParseCloudMetadataFile(c.CloudFile)          <========== 1
         if err != nil {
                 return err
         }
@@ -646,6 +646,8 @@ func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
 }
 
 ====================================================================================
+1.
+
 
         specifiedClouds, err := c.cloudMetadataStore.ParseCloudMetadataFile(c.CloudFile)
 
@@ -678,7 +680,7 @@ func ParseCloudMetadataFile(file string) (map[string]Cloud, error) {
         if err != nil {
                 return nil, err
         }
-        clouds, err := ParseCloudMetadata(data)
+        clouds, err := ParseCloudMetadata(data)         <------
         if err != nil {
                 return nil, err
         }
@@ -799,7 +801,22 @@ type cloudSet struct {
         Clouds map[string]*cloud `yaml:"clouds"`
 }
 
+
 --------------------------------------------------------------
+
+./cloud/clouds.go
+
+// RegionConfig holds a map of regions and the attributes that serve as the
+// region specific configuration options. This allows model inheritance to
+// function, providing a place to store configuration for a specific region
+// which is  passed down to other models under the same controller.
+type RegionConfig map[string]Attrs
+
+
+
+--------------------------------------------------------------
+
+./cloud/clouds.go
 
 // cloud is equivalent to Cloud, for marshalling and unmarshalling.
 type cloud struct {
@@ -815,6 +832,9 @@ type cloud struct {
         RegionConfig     RegionConfig           `yaml:"region-config,omitempty"`
 }
 
+--------------------------------------------------------------
+
+./cloud/clouds.go
 
 // Cloud is a cloud definition.
 type Cloud struct {
@@ -863,6 +883,9 @@ type Cloud struct {
         RegionConfig RegionConfig
 }
 
+--------------------------------------------------------------
+
+./cloud/clouds.go
 
 // Region is a cloud region.
 type Region struct {
@@ -882,6 +905,18 @@ type Region struct {
         // endpoint URL, this will be empty.
         StorageEndpoint string
 }
+
+
+--------------------------------------------------------------
+
+
+clouds:
+  <cloud_name>:
+    type: <type_of_cloud>
+    auth-types: <[access-key, oauth, userpass]>
+    regions:
+      <region-name>:
+        endpoint: <https://xxx.yyy.zzz:35574/v3.0/>
 
 
 --------------------------------------------------------------
