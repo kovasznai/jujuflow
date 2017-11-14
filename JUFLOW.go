@@ -1,5 +1,6 @@
 
 
+
 cat >> ~/maas.yaml << EOF
 clouds:/
   maas:
@@ -8,7 +9,7 @@ clouds:/
     endpoint: http://192.168.100.3/MAAS/
 EOF
 
-juju add-cloud maas ~/maas.yaml
+juju​ ​ add-cloud​ ​ maas​ ​ ~/maas.yaml
 
 
 
@@ -689,14 +690,13 @@ func ParseCloudMetadataFile(file string) (map[string]Cloud, error) {
 
 --------------------------------------------------------------
 
-cat​ ​ >>​ ​ ~/maas.yaml​ ​ <<​ ​ EOF
+cat >> ~/maas.yaml << EOF
 clouds:/
-​ ​ maas:
-​ ​ ​ ​ type:​ ​ maas
-​ ​ ​ ​ auth-types:​ ​ [oauth1]
-​ ​ ​ ​ endpoint:​ ​ http://192.168.100.3/MAAS/
+  maas:
+    type: maas
+    auth-types: [oauth1]
+    endpoint: http://192.168.100.3/MAAS/
 EOF
-
 
 --------------------------------------------------------------
 
@@ -704,6 +704,24 @@ EOF
 ./cloud/clouds.go
 
         "gopkg.in/yaml.v2"
+
+
+
+var defaultCloudDescription = map[string]string{
+        "aws":         "Amazon Web Services",
+        "aws-china":   "Amazon China",
+        "aws-gov":     "Amazon (USA Government)",
+        "google":      "Google Cloud Platform",
+        "azure":       "Microsoft Azure",
+        "azure-china": "Microsoft Azure China",
+        "rackspace":   "Rackspace Cloud",
+        "joyent":      "Joyent Cloud",
+        "cloudsigma":  "CloudSigma Cloud",
+        "lxd":         "LXD Container Hypervisor",
+        "maas":        "Metal As A Service",
+        "openstack":   "Openstack Cloud",
+        "oracle":      "Oracle Compute Cloud Service",
+}
 
 
 // ParseCloudMetadata parses the given yaml bytes into Clouds metadata.
@@ -729,6 +747,7 @@ func ParseCloudMetadata(data []byte) (map[string]Cloud, error) {
         }
         return clouds, nil
 }
+
 
 
 
@@ -769,6 +788,49 @@ func cloudFromInternal(in *cloud) Cloud {
 }
 
 
+
+
+meta
+
+{
+  "Name": "",
+  "Type": "openstack",
+  "Description": "",
+  "AuthTypes": [
+    "access-key",
+    "userpass"
+  ],
+  "Endpoint": "",
+  "IdentityEndpoint": "",
+  "StorageEndpoint": "",
+  "Regions": [
+    {
+      "Name": "reg1",
+      "Endpoint": "https://openstack.example.com:35574/v3.0/",
+      "IdentityEndpoint": "https://graph.windows.net",
+      "StorageEndpoint": "https://core.windows.net"
+    },
+    {
+      "Name": "reg2",
+      "Endpoint": "https://openstack.example.com:35574/v3.0/",
+      "IdentityEndpoint": "https://graph.windows.net",
+      "StorageEndpoint": "https://core.windows.net"
+    }
+  ],
+  "Config": null,
+  "RegionConfig": null
+}
+
+
+
+
+
+import (
+        "reflect"
+)
+
+
+
 func (cloud Cloud) denormaliseMetadata() {
         for name, region := range cloud.Regions {
                 r := region
@@ -777,6 +839,64 @@ func (cloud Cloud) denormaliseMetadata() {
         }
 }
 
+
+
+// inherit sets any blank fields in dst to their equivalent values in fields in src that have matching json tags.
+// The dst parameter must be a pointer to a struct.
+func inherit(dst, src interface{}) {
+        for tag := range tags(dst) {
+                setFieldByTag(dst, tag, fieldByTag(src, tag), false)
+        }
+}
+
+
+// tags returns the field offsets for the JSON tags defined by the given value, which must be
+// a struct or a pointer to a struct.
+func tags(x interface{}) map[string]int {
+        t := reflect.TypeOf(x)
+        if t.Kind() == reflect.Ptr {
+                t = t.Elem()
+        }
+        if t.Kind() != reflect.Struct {
+                panic(errors.Errorf("expected struct, not %s", t))
+        }
+
+        if tagm := tagsForType[t]; tagm != nil {
+                return tagm
+        }
+        panic(errors.Errorf("%s not found in type table", t))
+}
+
+
+
+// fieldByTag returns the value for the field in x with the given JSON tag, or "" if there is no such field.
+func fieldByTag(x interface{}, tag string) string {
+        tagm := tags(x)
+        v := reflect.ValueOf(x)
+        if v.Kind() == reflect.Ptr {
+                v = v.Elem()
+        }
+        if i, ok := tagm[tag]; ok {
+                return v.Field(i).Interface().(string)
+        }
+        return ""
+}
+
+
+
+// setFieldByTag sets the value for the field in x with the given JSON tag to val.
+// The override parameter specifies whether the value will be set even if the original value is non-empty.
+func setFieldByTag(x interface{}, tag, val string, override bool) {
+        i, ok := tags(x)[tag]
+        if !ok {
+                return
+        }
+        v := reflect.ValueOf(x).Elem()
+        f := v.Field(i)
+        if override || f.Interface().(string) == "" {
+                f.Set(reflect.ValueOf(val))
+        }
+}
 
 
 
@@ -813,6 +933,19 @@ type cloudSet struct {
 type RegionConfig map[string]Attrs
 
 
+// Attrs serves as a map to hold regions specific configuration attributes.
+// This serves to reduce confusion over having a nested map, i.e.
+// map[string]map[string]interface{}
+type Attrs map[string]interface{}
+
+
+
+// AuthType is the type of authentication used by the cloud.
+type AuthType string
+
+// AuthTypes is defined to allow sorting AuthType slices.
+type AuthTypes []AuthType
+
 
 --------------------------------------------------------------
 
@@ -831,6 +964,30 @@ type cloud struct {
         Config           map[string]interface{} `yaml:"config,omitempty"`
         RegionConfig     RegionConfig           `yaml:"region-config,omitempty"`
 }
+
+
+// regions is a collection of regions, either as a map and/or
+// as a yaml.MapSlice.
+//
+// When marshalling, we populate the Slice field only. This is
+// necessary for us to control the order of map items.
+//
+// When unmarshalling, we populate both Map and Slice. Map is
+// populated to simplify conversion to Region objects. Slice
+// is populated so we can identify the first map item, which
+// becomes the default region for the cloud.
+type regions struct {
+        Map   map[string]*region
+        Slice yaml.MapSlice
+}
+
+// region is equivalent to Region, for marshalling and unmarshalling.
+type region struct {
+        Endpoint         string `yaml:"endpoint,omitempty"`
+        IdentityEndpoint string `yaml:"identity-endpoint,omitempty"`
+        StorageEndpoint  string `yaml:"storage-endpoint,omitempty"`
+}
+
 
 --------------------------------------------------------------
 
