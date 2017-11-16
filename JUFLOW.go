@@ -562,7 +562,7 @@ type Command interface {
 
         // Run will execute the Command as directed by the options and positional
         // arguments passed to Init.
-        Run(ctx *Context) error
+        Run(ctx *Context) error                                                <------------
 
         // AllowInterspersedFlags returns whether the command allows flag
         // arguments to be interspersed with non-flag arguments.
@@ -647,8 +647,7 @@ func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
 }
 
 ====================================================================================
-1.
-
+__1__
 
         specifiedClouds, err := c.cloudMetadataStore.ParseCloudMetadataFile(c.CloudFile)
 
@@ -827,7 +826,68 @@ meta
 
 import (
         "reflect"
+        "strings"
 )
+
+
+
+
+
+func init() {
+        RegisterStructTags(Cloud{}, Region{})
+}
+
+// RegisterStructTags ensures the yaml tags for the given structs are able to be used
+// when parsing cloud metadata.
+func RegisterStructTags(vals ...interface{}) {
+        tags := mkTags(vals...)
+        for k, v := range tags {
+                tagsForType[k] = v
+        }
+}
+
+func mkTags(vals ...interface{}) map[reflect.Type]map[string]int {
+        typeMap := make(map[reflect.Type]map[string]int)
+        for _, v := range vals {
+                t := reflect.TypeOf(v)
+                typeMap[t] = yamlTags(t)
+        }
+        return typeMap
+}
+
+// yamlTags returns a map from yaml tag to the field index for the string fields in the given type.
+func yamlTags(t reflect.Type) map[string]int {
+        if t.Kind() != reflect.Struct {
+                panic(errors.Errorf("cannot get yaml tags on type %s", t))
+        }
+        tags := make(map[string]int)
+        for i := 0; i < t.NumField(); i++ {
+                f := t.Field(i)
+                if f.Type != reflect.TypeOf("") {
+                        continue
+                }
+                if tag := f.Tag.Get("yaml"); tag != "" {
+                        if i := strings.Index(tag, ","); i >= 0 {
+                                tag = tag[0:i]
+                        }
+                        if tag == "-" {
+                                continue
+                        }
+                        if tag != "" {
+                                f.Name = tag
+                        }
+                }
+                tags[f.Name] = i
+        }
+        return tags
+}
+
+
+
+
+
+
+
 
 
 
@@ -848,6 +908,13 @@ func inherit(dst, src interface{}) {
                 setFieldByTag(dst, tag, fieldByTag(src, tag), false)
         }
 }
+
+
+
+type structTags map[reflect.Type]map[string]int
+
+var tagsForType structTags = make(structTags)
+
 
 
 // tags returns the field offsets for the JSON tags defined by the given value, which must be
@@ -899,6 +966,25 @@ func setFieldByTag(x interface{}, tag, val string, override bool) {
 }
 
 
+
+
+// inherit sets any blank fields in dst to their equivalent values in fields in src that have matching json tags.
+// The dst parameter must be a pointer to a struct.
+func inherit(dst, src interface{}) {
+        for tag := range tags(dst) {
+                setFieldByTag(dst, tag, fieldByTag(src, tag), false)
+        }
+}
+
+
+
+func (cloud Cloud) denormaliseMetadata() {
+        for name, region := range cloud.Regions {
+                r := region
+                inherit(&r, &cloud)
+                cloud.Regions[name] = r
+        }
+}
 
 
 --------------------------------------------------------------
@@ -1077,5 +1163,361 @@ clouds:
 
 
 --------------------------------------------------------------
+
+
+#####################################################################################################
+__2__
+
+juju/juju/cloud/clouds.go
+
+// Cloud is a cloud definition.
+type Cloud struct {
+        // Name of the cloud.
+        Name string
+
+        // Type is the type of cloud, eg ec2, openstack etc.
+        // This is one of the provider names registered with
+        // environs.RegisterProvider.
+        Type string
+
+        // Description describes the type of cloud.
+        Description string
+
+        // AuthTypes are the authentication modes supported by the cloud.
+        AuthTypes AuthTypes
+
+        // Endpoint is the default endpoint for the cloud regions, may be
+        // overridden by a region.
+        Endpoint string
+
+        // IdentityEndpoint is the default identity endpoint for the cloud
+        // regions, may be overridden by a region.
+        IdentityEndpoint string
+
+        // StorageEndpoint is the default storage endpoint for the cloud
+        // regions, may be overridden by a region.
+        StorageEndpoint string
+
+        // Regions are the regions available in the cloud.
+        //
+        // Regions is a slice, and not a map, because order is important.
+        // The first region in the slice is the default region for the
+        // cloud.
+        Regions []Region
+
+        // Config contains optional cloud-specific configuration to use
+        // when bootstrapping Juju in this cloud. The cloud configuration
+        // will be combined with Juju-generated, and user-supplied values;
+        // user-supplied values taking precedence.
+        Config map[string]interface{}
+
+        // RegionConfig contains optional region specific configuration.
+        // Like Config above, this will be combined with Juju-generated and user
+        // supplied values; with user supplied values taking precedence.
+        RegionConfig RegionConfig
+}
+
+
+
+
+
+juju/juju/cmd/juju/cloud/add.go
+
+
+type CloudMetadataStore interface {
+        ParseCloudMetadataFile(path string) (map[string]cloud.Cloud, error)
+        ParseOneCloud(data []byte) (cloud.Cloud, error)
+        PublicCloudMetadata(searchPaths ...string) (result map[string]cloud.Cloud, fallbackUsed bool, _ error)
+        PersonalCloudMetadata() (map[string]cloud.Cloud, error)
+        WritePersonalCloudMetadata(cloudsMap map[string]cloud.Cloud) error
+}
+
+
+// AddCloudCommand is the command that allows you to add a cloud configuration
+// for use with juju bootstrap.
+type AddCloudCommand struct {
+        cmd.CommandBase
+
+        // Replace, if true, existing cloud information is overwritten.
+        Replace bool
+
+        // Cloud is the name fo the cloud to add.
+        Cloud string
+
+        // CloudFile is the name of the cloud YAML file.
+        CloudFile string
+
+        // Ping contains the logic for pinging a cloud endpoint to know whether or
+        // not it really has a valid cloud of the same type as the provider.  By
+        // default it just calls the correct provider's Ping method.
+        Ping func(p environs.EnvironProvider, endpoint string) error
+
+        cloudMetadataStore CloudMetadataStore
+}
+
+
+
+// Run executes the add cloud command, adding a cloud based on a passed-in yaml
+// file or interactive queries.
+func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
+        if c.CloudFile == "" {
+                return c.runInteractive(ctxt)
+        }
+
+        specifiedClouds, err := c.cloudMetadataStore.ParseCloudMetadataFile(c.CloudFile)          <========== 1
+        if err != nil {
+                return err
+        }
+        if specifiedClouds == nil {
+                return errors.New("no personal clouds are defined")
+        }
+        newCloud, ok := specifiedClouds[c.Cloud]
+        if !ok {
+                return errors.Errorf("cloud %q not found in file %q", c.Cloud, c.CloudFile)
+        }
+
+        // first validate cloud input
+        data, err := ioutil.ReadFile(c.CloudFile)
+        if err != nil {
+                return errors.Trace(err)
+        }
+        if err = cloud.ValidateCloudSet([]byte(data)); err != nil {
+                ctxt.Warningf(err.Error())
+        }
+
+        // validate cloud data
+        provider, err := environs.Provider(newCloud.Type)
+        if err != nil {
+                return errors.Trace(err)
+        }
+        schemas := provider.CredentialSchemas()
+        for _, authType := range newCloud.AuthTypes {
+                if _, defined := schemas[authType]; !defined {
+                        return errors.NotSupportedf("auth type %q", authType)
+                }
+        }
+        if err := c.verifyName(c.Cloud); err != nil {
+                return errors.Trace(err)
+        }
+
+        return addCloud(c.cloudMetadataStore, newCloud)                                            <========== 2
+}
+
+
+
+func addCloud(cloudMetadataStore CloudMetadataStore, newCloud cloud.Cloud) error {
+        personalClouds, err := cloudMetadataStore.PersonalCloudMetadata()
+        if err != nil {
+                return err
+        }
+        if personalClouds == nil {
+                personalClouds = make(map[string]cloud.Cloud)
+        }
+        personalClouds[newCloud.Name] = newCloud
+        return cloudMetadataStore.WritePersonalCloudMetadata(personalClouds)
+}
+
+
+=======================================================================================
+
+src/github.com/juju/juju/cloud/personalclouds.go
+
+
+import (
+        "github.com/juju/juju/juju/osenv"
+)
+
+
+
+// PersonalCloudMetadata loads any personal cloud metadata defined
+// in the Juju Home directory. If not cloud metadata is found,
+// that is not an error; nil is returned.
+func PersonalCloudMetadata() (map[string]Cloud, error) {
+        clouds, err := ParseCloudMetadataFile(JujuPersonalCloudsPath())
+        if err != nil && os.IsNotExist(err) {
+                return nil, nil
+        }
+        return clouds, err
+}
+
+
+
+// ParseCloudMetadataFile loads any cloud metadata defined
+// in the specified file.
+func ParseCloudMetadataFile(file string) (map[string]Cloud, error) {
+        data, err := ioutil.ReadFile(file)
+        if err != nil {
+                return nil, err
+        }
+        clouds, err := ParseCloudMetadata(data)
+        if err != nil {
+                return nil, err
+        }
+        return clouds, err
+}
+
+
+
+
+// JujuPersonalCloudsPath is the location where personal cloud information is
+// expected to be found. Requires JUJU_HOME to be set.
+func JujuPersonalCloudsPath() string {
+        return osenv.JujuXDGDataHomePath("clouds.yaml")
+}
+
+
+
+
+
+./juju/osenv/home.go
+
+
+import (
+        "os"
+        "path/filepath"
+        "runtime"
+        "sync"
+
+        "github.com/juju/utils"
+)
+
+var (
+        jujuXDGDataHomeMu sync.Mutex
+        jujuXDGDataHome   string
+)
+
+
+// JujuXDGDataHomePath returns the path to a file in the
+// current juju home.
+func JujuXDGDataHomePath(names ...string) string {
+        all := append([]string{JujuXDGDataHomeDir()}, names...)
+        return filepath.Join(all...)
+}
+
+s
+// JujuXDGDataHome returns the current juju home.
+func JujuXDGDataHome() string {
+        jujuXDGDataHomeMu.Lock()
+        defer jujuXDGDataHomeMu.Unlock()
+        return jujuXDGDataHome
+}
+
+
+
+// JujuXDGDataHomeDir returns the directory where juju should store application-specific files
+func JujuXDGDataHomeDir() string {
+        JujuXDGDataHomeDir := JujuXDGDataHome()
+        if JujuXDGDataHomeDir != "" {
+                return JujuXDGDataHomeDir
+        }
+        JujuXDGDataHomeDir = os.Getenv(JujuXDGDataHomeEnvKey)
+        if JujuXDGDataHomeDir == "" {
+                if runtime.GOOS == "windows" {
+                        JujuXDGDataHomeDir = jujuXDGDataHomeWin()
+                } else {
+                        JujuXDGDataHomeDir = jujuXDGDataHomeLinux()
+                }
+        }
+        return JujuXDGDataHomeDir
+}
+\// jujuXDGDataHomeLinux returns the directory where juju should store application-specific files on Linux.
+func jujuXDGDataHomeLinux() string {
+        xdgConfig := os.Getenv(XDGDataHome)
+        if xdgConfig != "" {
+                return filepath.Join(xdgConfig, "juju")
+        }
+        // If xdg config home is not defined, the standard indicates that its default value
+        // is $HOME/.local/share
+        home := utils.Home()
+        return filepath.Join(home, ".local", "share", "juju")
+}
+
+
+
+
+------------------------------------------------------------------
+
+
+
+cloud/personalclouds.go
+
+// WritePersonalCloudMetadata marshals to YAMl and writes the cloud metadata
+// to the personal cloud file.
+func WritePersonalCloudMetadata(cloudsMap map[string]Cloud) error {
+        data, err := marshalCloudMetadata(cloudsMap)
+        if err != nil {
+                return errors.Trace(err)
+        }
+        return ioutil.WriteFile(JujuPersonalCloudsPath(), data, os.FileMode(0600))
+}
+
+------------------------------------------------------------------
+
+
+cloud/clouds.go
+
+// marshalCloudMetadata marshals the given clouds to YAML.
+func marshalCloudMetadata(cloudsMap map[string]Cloud) ([]byte, error) {
+        clouds := cloudSet{make(map[string]*cloud)}
+        for name, metadata := range cloudsMap {
+                clouds.Clouds[name] = cloudToInternal(metadata, false)
+        }
+        data, err := yaml.Marshal(clouds)
+        if err != nil {
+                return nil, errors.Annotate(err, "cannot marshal cloud metadata")
+        }
+        return data, nil
+}
+
+
+// cloudSet contains cloud definitions, used for marshalling and
+// unmarshalling.
+type cloudSet struct {
+        // Clouds is a map of cloud definitions, keyed on cloud name.
+        Clouds map[string]*cloud `yaml:"clouds"`
+}
+
+// cloud is equivalent to Cloud, for marshalling and unmarshalling.
+type cloud struct {
+        Name             string                 `yaml:"name,omitempty"`
+        Type             string                 `yaml:"type"`
+        Description      string                 `yaml:"description,omitempty"`
+        AuthTypes        []AuthType             `yaml:"auth-types,omitempty,flow"`
+        Endpoint         string                 `yaml:"endpoint,omitempty"`
+        IdentityEndpoint string                 `yaml:"identity-endpoint,omitempty"`
+        StorageEndpoint  string                 `yaml:"storage-endpoint,omitempty"`
+        Regions          regions                `yaml:"regions,omitempty"`
+        Config           map[string]interface{} `yaml:"config,omitempty"`
+        RegionConfig     RegionConfig           `yaml:"region-config,omitempty"`
+}
+
+func cloudToInternal(in Cloud, withName bool) *cloud {
+        var regions regions
+        for _, r := range in.Regions {
+                regions.Slice = append(regions.Slice, yaml.MapItem{
+                        r.Name, region{
+                                r.Endpoint,
+                                r.IdentityEndpoint,
+                                r.StorageEndpoint,
+                        },
+                })
+        }
+        name := in.Name
+        if !withName {
+                name = ""
+        }
+        return &cloud{
+                Name:             name,
+                Type:             in.Type,
+                AuthTypes:        in.AuthTypes,
+                Endpoint:         in.Endpoint,
+                IdentityEndpoint: in.IdentityEndpoint,
+                StorageEndpoint:  in.StorageEndpoint,
+                Regions:          regions,
+                Config:           in.Config,
+                RegionConfig:     in.RegionConfig,
+        }
+}
+
 
 
