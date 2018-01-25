@@ -48,6 +48,8 @@ func Main(args []string) int {
 
 
 -----------------------------------------------------------------------------------------------
+juju/juju/cmd/juju/commands/main.go
+
 
 // main is a type that captures dependencies for running the main function.
 type main struct {
@@ -56,7 +58,9 @@ type main struct {
 }
 
 -----------------------------------------------------------------------------------------------
+juju/juju/cmd/juju/commands/main.go
 
+        "github.com/juju/cmd"
 
 // Run is the main entry point for the juju client.
 func (m main) Run(args []string) int {
@@ -96,13 +100,35 @@ func (m main) Run(args []string) int {
                 return 0
         }
 
-        jcmd := NewJujuCommand(ctx)           <===============
-        return cmd.Main(jcmd, ctx, args[1:])            <-------------
+        jcmd := NewJujuCommand(ctx)             <=============   |---> invokes: registerCommands(jcmd, ctx)
+        return cmd.Main(jcmd, ctx, args[1:])    <-------------
 }
+
+-----------------------------------------------------------------------------------------------
+juju/cmd/cmd.go
+
+// DefaultContext returns a Context suitable for use in non-hosted situations.
+func DefaultContext() (*Context, error) {
+        dir, err := os.Getwd()
+        if err != nil {
+                return nil, err
+        }
+        abs, err := filepath.Abs(dir)
+        if err != nil {
+                return nil, err
+        }
+        return &Context{
+                Dir:    abs,
+                Stdin:  os.Stdin,
+                Stdout: os.Stdout,
+                Stderr: os.Stderr,
+        }, nil
+}
+
 
 =============================================================================================
 
-juju/cmd.go:305:func Main(c Command, ctx *Context, args []string) int {
+juju/cmd.go:305
 
 
 // Main runs the given Command in the supplied Context with the given
@@ -120,7 +146,7 @@ func Main(c Command, ctx *Context, args []string) int {
         if rc, done := handleCommandError(c, ctx, c.Init(f.Args()), f); done {
                 return rc
         }
-        if err := c.Run(ctx); err != nil {
+        if err := c.Run(ctx); err != nil {              <============
                 if IsRcPassthroughError(err) {
                         return err.(*RcPassthroughError).Code
                 }
@@ -134,7 +160,7 @@ func Main(c Command, ctx *Context, args []string) int {
 
 -----------------------------------------------------------------------------------------------
 
-./cmd.go:63:type Command interface {
+juju/cmd.go:63
 
 
 // Command is implemented by types that interpret command-line arguments.
@@ -163,6 +189,9 @@ type Command interface {
 
 
 =============================================================================================
+juju/juju/cmd/juju/commands/main.go
+
+        jujucmd "github.com/juju/juju/cmd"
 
 
 // NewJujuCommand ...
@@ -178,11 +207,142 @@ func NewJujuCommand(ctx *cmd.Context) cmd.Command {
         return jcmd
 }
 
+-----------------------------------------------------------------------------------------------
+
+juju/juju/cmd/supercommand.go:37
+
+        "github.com/juju/cmd"
+
+// NewSuperCommand is like cmd.NewSuperCommand but
+// it adds juju-specific functionality:
+// - The default logging configuration is taken from the environment;
+// - The version is configured to the current juju version;
+// - The command emits a log message when a command runs.
+func NewSuperCommand(p cmd.SuperCommandParams) *cmd.SuperCommand {
+        p.Log = &cmd.Log{
+                DefaultConfig: os.Getenv(osenv.JujuLoggingConfigEnvKey),
+        }
+        current := version.Binary{
+                Number: jujuversion.Current,
+                Arch:   arch.HostArch(),
+                Series: series.MustHostSeries(),
+        }
+
+        // p.Version should be a version.Binary, but juju/cmd does not
+        // import juju/juju/version so this cannot happen. We have
+        // tests to assert that this string value is correct.
+        p.Version = current.String()
+        p.NotifyRun = runNotifier
+        return cmd.NewSuperCommand(p)
+}
 
 -----------------------------------------------------------------------------------------------
 
+juju/cmd/supercommand.go
 
+// NewSuperCommand creates and initializes a new `SuperCommand`, and returns
+// the fully initialized structure.
+func NewSuperCommand(params SuperCommandParams) *SuperCommand {
+        command := &SuperCommand{
+                Name:                params.Name,
+                Purpose:             params.Purpose,
+                Doc:                 params.Doc,
+                Log:                 params.Log,
+                usagePrefix:         params.UsagePrefix,
+                missingCallback:     params.MissingCallback,
+                Aliases:             params.Aliases,
+                version:             params.Version,
+                notifyRun:           params.NotifyRun,
+                notifyHelp:          params.NotifyHelp,
+                userAliasesFilename: params.UserAliasesFilename,
+        }
+        command.init()
+        return command
+}
+
+-----------------------------------------------------------------------------------------------
+
+juju/cmd/supercommand.go
+
+// SuperCommandParams provides a way to have default parameter to the
+// `NewSuperCommand` call.
+type SuperCommandParams struct {
+        // UsagePrefix should be set when the SuperCommand is
+        // actually a subcommand of some other SuperCommand;
+        // if NotifyRun is called, it name will be prefixed accordingly,
+        // unless UsagePrefix is identical to Name.
+        UsagePrefix string
+
+        // Notify, if not nil, is called when the SuperCommand
+        // is about to run a sub-command.
+        NotifyRun func(cmdName string)
+
+        // NotifyHelp is called just before help is printed, with the
+        // arguments received by the help command. This can be
+        // used, for example, to load command information for external
+        // "plugin" commands, so that their documentation will show up
+        // in the help output.
+        NotifyHelp func([]string)
+
+        Name            string
+        Purpose         string
+        Doc             string
+        Log             *Log
+        MissingCallback MissingCallback
+        Aliases         []string
+        Version         string
+
+        // UserAliasesFilename refers to the location of a file that contains
+        //   name = cmd [args...]
+        // values, that is used to change default behaviour of commands in order
+        // to add flags, or provide short cuts to longer commands.
+        UserAliasesFilename string
+}
+
+-----------------------------------------------------------------------------------------------
+
+./supercommand.go:119
+
+// SuperCommand is a Command that selects a subcommand and assumes its
+// properties; any command line arguments that were not used in selecting
+// the subcommand are passed down to it, and to Run a SuperCommand is to run
+// its selected subcommand.
+type SuperCommand struct {
+        CommandBase
+        Name                string
+        Purpose             string
+        Doc                 string
+        Log                 *Log
+        Aliases             []string
+        version             string
+        usagePrefix         string
+        userAliasesFilename string
+        userAliases         map[string][]string
+        subcmds             map[string]commandReference
+        help                *helpCommand
+        commonflags         *gnuflag.FlagSet
+        flags               *gnuflag.FlagSet
+        action              commandReference
+        showHelp            bool
+        showDescription     bool
+        showVersion         bool
+        noAlias             bool
+        missingCallback     MissingCallback
+        notifyRun           func(string)
+        notifyHelp          func([]string)
+}
+
+-----------------------------------------------------------------------------------------------
+
+juju/cmd.go:86
+
+// CommandBase provides the default implementation for SetFlags, Init, and Help.
+type CommandBase struct{}
+
+
+-----------------------------------------------------------------------------------------------
 juju/juju/cmd/juju/commands/main.go:389
+
 
 // registerCommands registers commands in the specified registry.
 func registerCommands(r commandRegistry, ctx *cmd.Context) {
@@ -952,7 +1112,3 @@ func (c *DeployCommand) deployCharm(
         }
         return errors.Trace(apiRoot.Deploy(args))
 }
-
-
-
-
