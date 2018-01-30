@@ -100,7 +100,7 @@ func (m main) Run(args []string) int {
                 return 0
         }
 
-        jcmd := NewJujuCommand(ctx)             <=============   |---> invokes: registerCommands(jcmd, ctx)
+        jcmd := NewJujuCommand(ctx)             <=============   |---> invokes: registerCommands(jcmd, ctx) | returns: cmd.Command interface and SuperCommand struct
         return cmd.Main(jcmd, ctx, args[1:])    <-------------
 }
 
@@ -125,6 +125,22 @@ func DefaultContext() (*Context, error) {
         }, nil
 }
 
+
+-----------------------------------------------------------------------------------------------
+juju/cmdo/cmd.go:110
+
+// Context represents the run context of a Command. Command implementations
+// should interpret file names relative to Dir (see AbsPath below), and print
+// output and errors to Stdout and Stderr respectively.
+type Context struct {
+        Dir     string
+        Env     map[string]string
+        Stdin   io.Reader
+        Stdout  io.Writer
+        Stderr  io.Writer
+        quiet   bool
+        verbose bool
+}
 
 =============================================================================================
 
@@ -162,7 +178,6 @@ func Main(c Command, ctx *Context, args []string) int {
 
 juju/cmd.go:63
 
-
 // Command is implemented by types that interpret command-line arguments.
 type Command interface {
         // IsSuperCommand returns true if the command is a super command.
@@ -186,12 +201,12 @@ type Command interface {
         AllowInterspersedFlags() bool
 }
 
-
-
 =============================================================================================
 juju/juju/cmd/juju/commands/main.go
 
         jujucmd "github.com/juju/juju/cmd"
+        "github.com/juju/cmd"
+        "github.com/juju/juju/juju/osenv"
 
 
 // NewJujuCommand ...
@@ -206,6 +221,27 @@ func NewJujuCommand(ctx *cmd.Context) cmd.Command {
         registerCommands(jcmd, ctx)
         return jcmd
 }
+
+
+-----------------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/commands/main.go:389
+
+        rcmd "github.com/juju/juju/cmd/juju/romulus/commands"
+
+
+// registerCommands registers commands in the specified registry.
+func registerCommands(r commandRegistry, ctx *cmd.Context) {
+
+        // Manage and control services
+
+        r.Register(application.NewDeployCommand())          <===========
+
+...
+
+        rcmd.RegisterAll(r)
+}
+
 
 -----------------------------------------------------------------------------------------------
 
@@ -262,6 +298,88 @@ func NewSuperCommand(params SuperCommandParams) *SuperCommand {
 
 -----------------------------------------------------------------------------------------------
 
+juju/cmd/supercommand.go:185
+
+// Register makes a subcommand available for use on the command line. The
+// command will be available via its own name, and via any supplied aliases.
+func (c *SuperCommand) Register(subcmd Command) {
+        info := subcmd.Info()
+        c.insert(commandReference{name: info.Name, command: subcmd})
+        for _, name := range info.Aliases {
+                c.insert(commandReference{name: name, command: subcmd, alias: info.Name})
+        }
+}
+
+-----------------------------------------------------------------------------------------------
+
+juju/cmd/supercommand.go
+
+func (c *SuperCommand) insert(value commandReference) {
+        if _, found := c.subcmds[value.name]; found {
+                panic(fmt.Sprintf("command already registered: %q", value.name))
+        }
+        c.subcmds[value.name] = value
+}
+
+
+-----------------------------------------------------------------------------------------------
+
+github.com/juju/cmd/cmd.go:63
+
+type Command interface {
+
+        IsSuperCommand() bool
+
+        Info() *Info
+
+        SetFlags(f *gnuflag.FlagSet)
+
+        Init(args []string) error
+
+        Run(ctx *Context) error
+
+        AllowInterspersedFlags() bool
+}
+
+
+-----------------------------------------------------------------------------------------------
+
+juju/cmd/supercommand.go:149
+
+func (c *SuperCommand) init() {
+        if c.subcmds != nil {
+                return
+        }
+        c.help = &helpCommand{
+                super: c,
+        }
+        c.help.init()
+        c.subcmds = map[string]commandReference{
+                "help": commandReference{command: c.help},
+        }
+        if c.version != "" {
+                c.subcmds["version"] = commandReference{
+                        command: newVersionCommand(c.version),
+                }
+        }
+
+        c.userAliases = ParseAliasFile(c.userAliasesFilename)
+}
+
+
+
+-----------------------------------------------------------------------------------------------
+juju/cmd/supercommand.go:108
+
+type commandReference struct {
+        name    string
+        command Command
+        alias   string
+        check   DeprecationCheck
+}
+
+-----------------------------------------------------------------------------------------------
+
 juju/cmd/supercommand.go
 
 // SuperCommandParams provides a way to have default parameter to the
@@ -301,7 +419,7 @@ type SuperCommandParams struct {
 
 -----------------------------------------------------------------------------------------------
 
-./supercommand.go:119
+juju/cmd/supercommand.go:119
 
 // SuperCommand is a Command that selects a subcommand and assumes its
 // properties; any command line arguments that were not used in selecting
@@ -340,17 +458,6 @@ juju/cmd.go:86
 type CommandBase struct{}
 
 
------------------------------------------------------------------------------------------------
-juju/juju/cmd/juju/commands/main.go:389
-
-
-// registerCommands registers commands in the specified registry.
-func registerCommands(r commandRegistry, ctx *cmd.Context) {
-
-        // Manage and control services
-
-        r.Register(application.NewDeployCommand())                      <== modelcmd.Wrap(deployCmd) <== deployCmd := &DeployCommand{
-
 
 -----------------------------------------------------------------------------------------------
 
@@ -364,6 +471,24 @@ type commandRegistry interface {
         RegisterDeprecated(subcmd cmd.Command, check cmd.DeprecationCheck)
 }
 
+-----------------------------------------------------------------------------------------------
+
+./cmd/juju/romulus/commands/commands.go:28
+
+// RegisterAll registers all romulus commands with the
+// provided command registry.
+func RegisterAll(r commandRegister) {
+        r.Register(agree.NewAgreeCommand())
+        r.Register(listagreements.NewListAgreementsCommand())
+        r.Register(budget.NewBudgetCommand())
+        r.Register(createwallet.NewCreateWalletCommand())
+        r.Register(listplans.NewListPlansCommand())
+        r.Register(setwallet.NewSetWalletCommand())
+        r.Register(setplan.NewSetPlanCommand())
+        r.Register(showwallet.NewShowWalletCommand())
+        r.Register(sla.NewSLACommand())
+        r.Register(listwallets.NewListWalletsCommand())
+}
 
 -----------------------------------------------------------------------------------------------
 
@@ -482,9 +607,6 @@ func (c *SuperCommand) Run(ctx *Context) error {
         }
         return err
 
-
------------------------------------------------------------------------------------------------
-...
 -----------------------------------------------------------------------------------------------
 
 juju/juju/cmd/juju/application/deploy.go:813:func (c *DeployCommand) Run(ctx *cmd.Context) error {
@@ -1112,3 +1234,7 @@ func (c *DeployCommand) deployCharm(
         }
         return errors.Trace(apiRoot.Deploy(args))
 }
+
+
+
+
