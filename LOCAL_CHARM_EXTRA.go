@@ -780,3 +780,811 @@ type commandReference struct {
         check   DeprecationCheck
 }
 
+
+###############################################################################################
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        <------
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      <=========
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:941
+
+
+type deployFn func(*cmd.Context, DeployAPI) error
+
+
+func findDeployerFIFO(maybeDeployers ...func() (deployFn, error)) (deployFn, error) {
+        for _, d := range maybeDeployers {
+                if deploy, err := d(); err != nil {
+                        return nil, errors.Trace(err)
+                } else if deploy != nil {
+                        return deploy, nil
+                }
+        }
+        return nil, errors.NotFoundf("suitable deployer")
+}
+
+
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+https://gobyexample.com/variadic-functions
+
+func sum(nums ...int) {
+
+Here’s a function that will take an arbitrary number of ints as arguments.
+
+
+If you already have multiple args in a slice, apply them to a variadic function using func(slice...) like this.
+
+
+func main() {
+
+    nums := []int{1, 2, 3, 4}
+    sum(nums...)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+
+
+===================================================================================================
+
+juju/juju/cmd/juju/application/deploy.go
+
+
+        "github.com/juju/juju/cmd/modelcmd"
+
+
+type DeployCommand struct {
+        modelcmd.ModelCommandBase         <===========
+        UnitCommandBase
+
+        // CharmOrBundle is either a charm URL, a path where a charm can be found,
+        // or a bundle name.
+        CharmOrBundle string
+
+        // BundleOverlay refers to config files that specify additional bundle
+        // configuration to be merged with the main bundle.
+        BundleOverlayFile []string
+
+        // Channel holds the charmstore channel to use when obtaining
+        // the charm to be deployed.
+        Channel params.Channel
+
+        // Series is the series of the charm to deploy.
+        Series string
+
+        // Force is used to allow a charm to be deployed onto a machine
+        // running an unsupported series.
+        Force bool
+
+        // DryRun is used to specify that the bundle shouldn't actually be
+        // deployed but just output the changes.
+        DryRun bool
+
+        ApplicationName string
+        ConfigOptions   common.ConfigFlag
+        ConstraintsStr  string
+        Constraints     constraints.Value
+        BindToSpaces    string
+
+        // TODO(axw) move this to UnitCommandBase once we support --storage
+        // on add-unit too.
+        //
+        // Storage is a map of storage constraints, keyed on the storage name
+        // defined in charm storage metadata.
+        Storage map[string]storage.Constraints
+
+        // BundleStorage maps application names to maps of storage constraints keyed on
+        // the storage name defined in that application's charm storage metadata.
+        BundleStorage map[string]map[string]storage.Constraints
+
+        // Resources is a map of resource name to filename to be uploaded on deploy.
+        Resources map[string]string
+
+        Bindings map[string]string
+        Steps    []DeployStep
+
+        // UseExisting machines when deploying the bundle.
+        UseExisting bool
+        // BundleMachines is a mapping for machines in the bundle to machines
+        // in the model.
+        BundleMachines map[string]string
+
+        // NewAPIRoot stores a function which returns a new API root.
+        NewAPIRoot func() (DeployAPI, error)
+
+        machineMap string
+        flagSet    *gnuflag.FlagSet
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        <------
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      <=========
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:941
+
+
+type deployFn func(*cmd.Context, DeployAPI) error
+
+
+func findDeployerFIFO(maybeDeployers ...func() (deployFn, error)) (deployFn, error) {
+        for _, d := range maybeDeployers {
+                if deploy, err := d(); err != nil {       <==== !!!function are called here!!!
+                        return nil, errors.Trace(err)
+                } else if deploy != nil {
+                        return deploy, nil
+                }
+        }
+        return nil, errors.NotFoundf("suitable deployer")
+}
+
+----------------------------------------------------------------------------------------
+
+./cmd/juju/application/deploy.go:997
+
+        "gopkg.in/juju/charmrepo.v2"
+
+
+func (c *DeployCommand) maybeReadLocalBundle() (deployFn, error) {
+        bundleFile := c.CharmOrBundle    // CharmOrBundle is either a charm URL, a path where a charm can be found
+        var bundleDir string
+        isDir := false
+        resolveDir := false
+
+        bundleData, err := charmrepo.ReadBundleFile(bundleFile)
+        if err != nil {
+                // We may have been given a local bundle archive or exploded directory.
+                bundle, _, pathErr := charmrepo.NewBundleAtPath(bundleFile)
+                if charmrepo.IsInvalidPathError(pathErr) {
+                        return nil, errors.Errorf(""+
+                                "The charm or bundle %q is ambiguous.\n"+
+                                "To deploy a local charm or bundle, run `juju deploy ./%[1]s`.\n"+
+                                "To deploy a charm or bundle from the store, run `juju deploy cs:%[1]s`.",
+                                bundleFile,
+                        )
+                }
+                if pathErr != nil {
+                        // If the bundle files existed but we couldn't read them,
+                        // then return that error rather than trying to interpret
+                        // as a charm.
+                        if info, statErr := os.Stat(bundleFile); statErr == nil {
+                                if info.IsDir() {
+                                        if _, ok := pathErr.(*charmrepo.NotFoundError); !ok {
+                                                return nil, errors.Annotate(pathErr, "cannot deploy bundle")
+                                        }
+                                }
+                        }
+
+                        logger.Debugf("cannot interpret as local bundle: %v", err)
+                        return nil, nil
+                }
+
+                bundleData = bundle.Data()
+                if info, err := os.Stat(bundleFile); err == nil && info.IsDir() {
+                        resolveDir = true
+                        isDir = true
+                }
+        } else {
+                resolveDir = true
+        }
+
+        if err := c.validateBundleFlags(); err != nil {
+                return nil, errors.Trace(err)
+        }
+
+        return func(ctx *cmd.Context, apiRoot DeployAPI) error {
+                if resolveDir {
+                        if isDir {
+                                // If we get to here bundleFile is a directory, in which case
+                                // we should use the absolute path as the bundFilePath, or it is
+                                // an archive, in which case we should pass the empty string.
+                                bundleDir = ctx.AbsPath(bundleFile)
+                        } else {
+                                // If the bundle is defined with just a yaml file, the bundle
+                                // path is the directory that holds the file.
+                                bundleDir = filepath.Dir(ctx.AbsPath(bundleFile))
+                        }
+                }
+                return errors.Trace(c.deployBundle(
+                        ctx,
+                        bundleDir,
+                        bundleData,
+                        c.Channel,
+                        apiRoot,
+                        c.BundleStorage,
+                ))
+        }, nil
+}
+
+
+----------------------------------------------------------------------------------------
+
+gopkg.in/juju/charmrepo.v2-unstable/bundlepath.go
+
+
+        "gopkg.in/juju/charm.v6-unstable"
+
+
+// ReadBundleFile attempts to read the file at path
+// and interpret it as a bundle.
+func ReadBundleFile(path string) (*charm.BundleData, error) {
+        f, err := os.Open(path)
+        if err != nil {
+                if isNotExistsError(err) {
+                        return nil, BundleNotFound(path)
+                }
+                return nil, err
+        }
+        defer f.Close()
+        return charm.ReadBundleData(f)
+}
+
+
+----------------------------------------------------------------------------------------
+
+gopkg.in/juju/charm.v6-unstable:242:func ReadBundleData(r io.Reader) (*BundleData, error) {
+
+// ReadBundleData reads bundle data from the given reader.
+// The returned data is not verified - call Verify to ensure
+// that it is OK.
+func ReadBundleData(r io.Reader) (*BundleData, error) {
+        bytes, err := ioutil.ReadAll(r)
+        if err != nil {
+                return nil, err
+        }
+        var bd BundleData
+        if err := yaml.Unmarshal(bytes, &bd); err != nil {
+                return nil, fmt.Errorf("cannot unmarshal bundle data: %v", err)
+        }
+        return &bd, nil
+}
+
+
+----------------------------------------------------------------------------------------
+gopkg.in/juju/charm.v6-unstable
+
+// BundleData holds the contents of the bundle.
+type BundleData struct {
+        // Applications holds one entry for each application
+        // that the bundle will create, indexed by
+        // the application name.
+        Applications map[string]*ApplicationSpec `bson:"applications,omitempty" json:"applications,omitempty" yaml:"applications,omitempty"`
+
+        // Machines holds one entry for each machine referred to
+        // by unit placements. These will be mapped onto actual
+        // machines at bundle deployment time.
+        // It is an error if a machine is specified but
+        // not referred to by a unit placement directive.
+        Machines map[string]*MachineSpec `bson:",omitempty" json:",omitempty" yaml:",omitempty"`
+
+        // Series holds the default series to use when
+        // the bundle chooses charms.
+        Series string `bson:",omitempty" json:",omitempty" yaml:",omitempty"`
+
+        // Relations holds a slice of 2-element slices,
+        // each specifying a relation between two applications.
+        // Each two-element slice holds two endpoints,
+        // each specified as either colon-separated
+        // (application, relation) pair or just an application name.
+        // The relation is made between each. If the relation
+        // name is omitted, it will be inferred from the available
+        // relations defined in the applications' charms.
+        Relations [][]string `bson:",omitempty" json:",omitempty" yaml:",omitempty"`
+
+        // White listed set of tags to categorize bundles as we do charms.
+        Tags []string `bson:",omitempty" json:",omitempty" yaml:",omitempty"`
+
+        // Short paragraph explaining what the bundle is useful for.
+        Description string `bson:",omitempty" json:",omitempty" yaml:",omitempty"`
+
+        // unmarshaledWithServices holds whether the original marshaled data held a
+        // legacy "services" field rather than the "applications" field.
+        unmarshaledWithServices bool
+}
+
+
+
+      
+===================================================================================================
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        <------
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      <=========
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:941
+
+
+type deployFn func(*cmd.Context, DeployAPI) error
+
+
+func findDeployerFIFO(maybeDeployers ...func() (deployFn, error)) (deployFn, error) {
+        for _, d := range maybeDeployers {
+                if deploy, err := d(); err != nil {
+                        return nil, errors.Trace(err)
+                } else if deploy != nil {
+                        return deploy, nil
+                }
+        }
+        return nil, errors.NotFoundf("suitable deployer")
+}
+
+----------------------------------------------------------------------------------------
+
+./cmd/juju/application/deploy.go
+
+func (c *DeployCommand) maybeReadLocalCharm(apiRoot DeployAPI) (deployFn, error) {
+        // NOTE: Here we select the series using the algorithm defined by
+        // `seriesSelector.CharmSeries`. This serves to override the algorithm found in
+        // `charmrepo.NewCharmAtPath` which is outdated (but must still be
+        // called since the code is coupled with path interpretation logic which
+        // cannot easily be factored out).
+
+        // NOTE: Reading the charm here is only meant to aid in inferring the correct
+        // series, if this fails we fall back to the argument series. If reading
+        // the charm fails here it will also fail below (the charm is read again
+        // below) where it is handled properly. This is just an expedient to get
+        // the correct series. A proper refactoring of the charmrepo package is
+        // needed for a more elegant fix.
+
+        ch, err := charm.ReadCharm(c.CharmOrBundle)
+        series := c.Series
+        if err == nil {
+                modelCfg, err := getModelConfig(apiRoot)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                seriesSelector := seriesSelector{
+                        seriesFlag:      series,
+                        supportedSeries: ch.Meta().Series,
+                        force:           c.Force,
+                        conf:            modelCfg,
+                        fromBundle:      false,
+                }
+
+                series, err = seriesSelector.charmSeries()
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+        }
+
+        // Charm may have been supplied via a path reference.
+        ch, curl, err := charmrepo.NewCharmAtPathForceSeries(c.CharmOrBundle, series, c.Force)
+        // We check for several types of known error which indicate
+        // that the supplied reference was indeed a path but there was
+        // an issue reading the charm located there.
+        if charm.IsMissingSeriesError(err) {
+                return nil, err
+        } else if charm.IsUnsupportedSeriesError(err) {
+                return nil, errors.Trace(err)
+        } else if errors.Cause(err) == zip.ErrFormat {
+                return nil, errors.Errorf("invalid charm or bundle provided at %q", c.CharmOrBundle)
+        } else if _, ok := err.(*charmrepo.NotFoundError); ok {
+                return nil, errors.Wrap(err, errors.NotFoundf("charm or bundle at %q", c.CharmOrBundle))
+        } else if err != nil && err != os.ErrNotExist {
+                // If we get a "not exists" error then we attempt to interpret
+                // the supplied charm reference as a URL elsewhere, otherwise
+                // we return the error.
+                return nil, errors.Trace(err)
+        } else if err != nil {
+                logger.Debugf("cannot interpret as local charm: %v", err)
+                return nil, nil
+        }
+
+        return func(ctx *cmd.Context, apiRoot DeployAPI) error {
+                if err := c.validateCharmFlags(); err != nil {
+                        return errors.Trace(err)
+                }
+
+                if curl, err = apiRoot.AddLocalCharm(curl, ch); err != nil {
+                        return errors.Trace(err)
+                }
+
+                id := charmstore.CharmID{
+                        URL: curl,
+                        // Local charms don't need a channel.
+                }
+
+                ctx.Infof("Deploying charm %q.", curl.String())
+                return errors.Trace(c.deployCharm(
+                        id,
+                        (*macaroon.Macaroon)(nil), // local charms don't need one.
+                        curl.Series,
+                        ctx,
+                        apiRoot,
+                ))
+        }, nil
+}
+
+===================================================================================================
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        <------
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      <=========
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:941
+
+
+type deployFn func(*cmd.Context, DeployAPI) error
+
+
+func findDeployerFIFO(maybeDeployers ...func() (deployFn, error)) (deployFn, error) {
+        for _, d := range maybeDeployers {
+                if deploy, err := d(); err != nil {
+                        return nil, errors.Trace(err)
+                } else if deploy != nil {
+                        return deploy, nil
+                }
+        }
+        return nil, errors.NotFoundf("suitable deployer")
+}
+
+----------------------------------------------------------------------------------------
+
+./cmd/juju/application/deploy.go
+
+func (c *DeployCommand) maybePredeployedLocalCharm() (deployFn, error) {
+        // If the charm's schema is local, we should definitively attempt
+        // to deploy a charm that's already deployed in the
+        // environment.
+        userCharmURL, err := charm.ParseURL(c.CharmOrBundle)
+        if err != nil {
+                return nil, errors.Trace(err)
+        } else if userCharmURL.Schema != "local" {
+                logger.Debugf("cannot interpret as a redeployment of a local charm from the controller")
+                return nil, nil
+        }
+
+        return func(ctx *cmd.Context, api DeployAPI) error {
+                if err := c.validateCharmFlags(); err != nil {
+                        return errors.Trace(err)
+                }
+                formattedCharmURL := userCharmURL.String()
+                ctx.Infof("Located charm %q.", formattedCharmURL)
+                ctx.Infof("Deploying charm %q.", formattedCharmURL)
+                return errors.Trace(c.deployCharm(
+                        charmstore.CharmID{URL: userCharmURL},
+                        (*macaroon.Macaroon)(nil),
+                        userCharmURL.Series,
+                        ctx,
+                        api,
+                ))
+        }, nil
+}
+
+
+===================================================================================================
+
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        <------
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      <=========
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:941
+
+
+type deployFn func(*cmd.Context, DeployAPI) error
+
+
+func findDeployerFIFO(maybeDeployers ...func() (deployFn, error)) (deployFn, error) {
+        for _, d := range maybeDeployers {
+                if deploy, err := d(); err != nil {
+                        return nil, errors.Trace(err)
+                } else if deploy != nil {
+                        return deploy, nil
+                }
+        }
+        return nil, errors.NotFoundf("suitable deployer")
+}
+
+----------------------------------------------------------------------------------------
+
+./cmd/juju/application/deploy.go
+
+func (c *DeployCommand) maybeReadCharmstoreBundleFn(apiRoot DeployAPI) func() (deployFn, error) {
+        return func() (deployFn, error) {
+                userRequestedURL, err := charm.ParseURL(c.CharmOrBundle)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                modelCfg, err := getModelConfig(apiRoot)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                // Charm or bundle has been supplied as a URL so we resolve and
+                // deploy using the store.
+                storeCharmOrBundleURL, channel, _, err := apiRoot.Resolve(modelCfg, userRequestedURL)
+                if charm.IsUnsupportedSeriesError(err) {
+                        return nil, errors.Errorf("%v. Use --force to deploy the charm anyway.", err)
+                } else if err != nil {
+                        return nil, errors.Trace(err)
+                } else if storeCharmOrBundleURL.Series != "bundle" {
+                        logger.Debugf(
+                                `cannot interpret as charmstore bundle: %v (series) != "bundle"`,
+                                storeCharmOrBundleURL.Series,
+                        )
+                        return nil, nil
+                }
+
+                if err := c.validateBundleFlags(); err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                return func(ctx *cmd.Context, apiRoot DeployAPI) error {
+                        bundle, err := apiRoot.GetBundle(storeCharmOrBundleURL)
+                        if err != nil {
+                                return errors.Trace(err)
+                        }
+                        ctx.Infof("Located bundle %q", storeCharmOrBundleURL)
+                        data := bundle.Data()
+
+                        return errors.Trace(c.deployBundle(
+                                ctx,
+                                "", // filepath
+                                data,
+                                channel,
+                                apiRoot,
+                                c.BundleStorage,
+                        ))
+                }, nil
+        }
+}
+
+===================================================================================================
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        <------
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      <=========
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:941
+
+
+type deployFn func(*cmd.Context, DeployAPI) error
+
+
+func findDeployerFIFO(maybeDeployers ...func() (deployFn, error)) (deployFn, error) {
+        for _, d := range maybeDeployers {
+                if deploy, err := d(); err != nil {
+                        return nil, errors.Trace(err)
+                } else if deploy != nil {
+                        return deploy, nil
+                }
+        }
+        return nil, errors.NotFoundf("suitable deployer")
+}
+
+----------------------------------------------------------------------------------------
+
+./cmd/juju/application/deploy.go
+
+func (c *DeployCommand) charmStoreCharm() (deployFn, error) {
+        userRequestedURL, err := charm.ParseURL(c.CharmOrBundle)
+        if err != nil {
+                return nil, errors.Trace(err)
+        }
+
+        return func(ctx *cmd.Context, apiRoot DeployAPI) error {
+                // resolver.resolve potentially updates the series of anything
+                // passed in. Store this for use in seriesSelector.
+                userRequestedSeries := userRequestedURL.Series
+
+                modelCfg, err := getModelConfig(apiRoot)
+                if err != nil {
+                        return errors.Trace(err)
+                }
+
+                // Charm or bundle has been supplied as a URL so we resolve and deploy using the store.
+                storeCharmOrBundleURL, channel, supportedSeries, err := apiRoot.Resolve(modelCfg, userRequestedURL)
+                if charm.IsUnsupportedSeriesError(err) {
+                        return errors.Errorf("%v. Use --force to deploy the charm anyway.", err)
+                } else if err != nil {
+                        return errors.Trace(err)
+                }
+
+                if err := c.validateCharmFlags(); err != nil {
+                        return errors.Trace(err)
+                }
+
+                selector := seriesSelector{
+                        charmURLSeries:  userRequestedSeries,
+                        seriesFlag:      c.Series,
+                        supportedSeries: supportedSeries,
+                        force:           c.Force,
+                        conf:            modelCfg,
+                        fromBundle:      false,
+                }
+
+                // Get the series to use.
+                series, err := selector.charmSeries()
+                if charm.IsUnsupportedSeriesError(err) {
+                        return errors.Errorf("%v. Use --force to deploy the charm anyway.", err)
+                }
+
+                // Store the charm in the controller
+                curl, csMac, err := addCharmFromURL(apiRoot, storeCharmOrBundleURL, channel)
+                if err != nil {
+                        if termErr, ok := errors.Cause(err).(*common.TermsRequiredError); ok {
+                                return errors.Trace(termErr.UserErr())
+                        }
+                        return errors.Annotatef(err, "storing charm for URL %q", storeCharmOrBundleURL)
+                }
+
+                formattedCharmURL := curl.String()
+                ctx.Infof("Located charm %q.", formattedCharmURL)
+                ctx.Infof("Deploying charm %q.", formattedCharmURL)
+                id := charmstore.CharmID{
+                        URL:     curl,
+                        Channel: channel,
+                }
+                return errors.Trace(c.deployCharm(
+                        id,
+                        csMac,
+                        series,
+                        ctx,
+                        apiRoot,
+                ))
+        }, nil
+}
+
+===================================================================================================
