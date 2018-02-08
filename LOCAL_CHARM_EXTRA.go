@@ -1,3 +1,5 @@
+
+
 juju/juju/juju/osenv/home.go:45
 
 // JujuXDGDataHomePath returns the path to a file in the
@@ -1575,7 +1577,7 @@ func (c *DeployCommand) charmStoreCharm() (deployFn, error) {
                         URL:     curl,
                         Channel: channel,
                 }
-                return errors.Trace(c.deployCharm(
+                return errors.Trace(c.deployCharm(        <=======
                         id,
                         csMac,
                         series,
@@ -1588,6 +1590,8 @@ func (c *DeployCommand) charmStoreCharm() (deployFn, error) {
 ===================================================================================================
 
 juju/juju/cmd/juju/application/deploy.go
+
+        "github.com/juju/juju/api/application"
 
 func (c *DeployCommand) deployCharm(
         id charmstore.CharmID,
@@ -1756,3 +1760,342 @@ func (c *DeployCommand) deployCharm(
         }
         return errors.Trace(apiRoot.Deploy(args))
 }
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+c *DeployCommand
+apiRoot, err := c.NewAPIRoot()
+NewAPIRoot func() (DeployAPI, error)  
+defer apiRoot.Close()
+apiRoot.Deploy(args)
+apiRoot.BestFacadeVersion
+apiRoot.ServerVersion
+apiRoot.CharmInfo
+apiRoot.ModelUUID
+apiRoot.Resolve
+apiRoot.GetBundle
+apiRoot.GetAnnotations
+apiRoot.GetConfig
+apiRoot.GetConstraints
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+----------------------------------------------------------------------------------------
+
+
+juju/juju/api/application/client.go:64
+
+// DeployArgs holds the arguments to be sent to Client.ServiceDeploy.
+type DeployArgs struct {
+
+        // CharmID identifies the charm to deploy.
+        CharmID charmstore.CharmID
+
+        // ApplicationName is the name to give the application.
+        ApplicationName string
+
+        // Series to be used for the machine.
+        Series string
+
+        // NumUnits is the number of units to deploy.
+        NumUnits int
+
+        // ConfigYAML is a string that overrides the default config.yml.
+        ConfigYAML string
+
+        // Config are values that override those in the default config.yaml
+        // or configure the application itself.
+        Config map[string]string
+
+        // Cons contains constraints on where units of this application
+        // may be placed.
+        Cons constraints.Value
+
+        // Placement directives on where the machines for the unit must be
+        // created.
+        Placement []*instance.Placement
+
+        // Storage contains Constraints specifying how storage should be
+        // handled.
+        Storage map[string]storage.Constraints
+
+        // AttachStorage contains IDs of existing storage that should be
+        // attached to the application unit that will be deployed. This
+        // may be non-empty only if NumUnits is 1.
+        AttachStorage []string
+
+        // EndpointBindings
+        EndpointBindings map[string]string
+
+        // Collection of resource names for the application, with the
+        // value being the unique ID of a pre-uploaded resources in
+        // storage.
+        Resources map[string]string
+}
+
+
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go
+
+type deployAPIAdapter struct {
+        api.Connection
+        *apiClient
+        *charmsClient
+        *applicationClient
+        *modelConfigClient
+        *charmRepoClient
+        *charmstoreClient
+        *annotationsClient
+}
+
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go:159
+
+func (a *deployAPIAdapter) Deploy(args application.DeployArgs) error {
+        for i, p := range args.Placement {
+                if p.Scope == "model-uuid" {
+                        p.Scope = a.applicationClient.ModelUUID()
+                }
+                args.Placement[i] = p
+        }
+
+        return errors.Trace(a.applicationClient.Deploy(args))
+}
+
+
+
+
+----------------------------------------------------------------------------------------
+
+./apiserver/facades/client/application/application.go:176
+
+// Deploy fetches the charms from the charm store and deploys them
+// using the specified placement directives.
+func (api *APIv5) Deploy(args params.ApplicationsDeploy) (params.ErrorResults, error) {
+        if err := api.checkCanWrite(); err != nil {
+                return params.ErrorResults{}, errors.Trace(err)
+        }
+        result := params.ErrorResults{
+                Results: make([]params.ErrorResult, len(args.Applications)),
+        }
+        if err := api.check.ChangeAllowed(); err != nil {
+                return result, errors.Trace(err)
+        }
+        for i, arg := range args.Applications {
+                err := deployApplication(api.backend, api.stateCharm, arg, api.deployApplicationFunc)
+                result.Results[i].Error = common.ServerError(err)
+
+                if err != nil && len(arg.Resources) != 0 {
+                        // Remove any pending resources - these would have been
+                        // converted into real resources if the application had
+                        // been created successfully, but will otherwise be
+                        // leaked. lp:1705730
+                        // TODO(babbageclunk): rework the deploy API so the
+                        // resources are created transactionally to avoid needing
+                        // to do this.
+                        resources, err := api.backend.Resources()
+                        if err != nil {
+                                logger.Errorf("couldn't get backend.Resources")
+                                continue
+                        }
+                        err = resources.RemovePendingAppResources(arg.ApplicationName, arg.Resources)
+                        if err != nil {
+                                logger.Errorf("couldn't remove pending resources for %q", arg.ApplicationName)
+                        }
+                }
+        }
+        return result, nil
+}
+
+
+
+
+
+
+
+======================================================================================
+
+
+juju/juju/cmd/juju/application/deploy.go
+
+func (c *DeployCommand) Run(ctx *cmd.Context) error {
+        var err error
+        c.Constraints, err = common.ParseConstraints(ctx, c.ConstraintsStr)
+        if err != nil {
+                return err
+        }
+        apiRoot, err := c.NewAPIRoot()          <=========
+        if err != nil {
+                return errors.Trace(err)
+        }
+        defer apiRoot.Close()
+
+        deploy, err := findDeployerFIFO(        
+                c.maybeReadLocalBundle,
+                func() (deployFn, error) { return c.maybeReadLocalCharm(apiRoot) },      
+                c.maybePredeployedLocalCharm,
+                c.maybeReadCharmstoreBundleFn(apiRoot),
+                c.charmStoreCharm, // This always returns a deployer        
+        )
+        if err != nil {
+                return errors.Trace(err)
+        }
+
+        return block.ProcessBlockedError(deploy(ctx, apiRoot), block.BlockChange)
+}
+
+
+----------------------------------------------------------------------------------------
+
+juju/juju/cmd/juju/application/deploy.go
+
+
+        "github.com/juju/juju/cmd/modelcmd"
+
+
+type DeployCommand struct {
+        modelcmd.ModelCommandBase
+        UnitCommandBase
+
+        // CharmOrBundle is either a charm URL, a path where a charm can be found,
+        // or a bundle name.
+        CharmOrBundle string
+
+        // BundleOverlay refers to config files that specify additional bundle
+        // configuration to be merged with the main bundle.
+        BundleOverlayFile []string
+
+        // Channel holds the charmstore channel to use when obtaining
+        // the charm to be deployed.
+        Channel params.Channel
+
+        // Series is the series of the charm to deploy.
+        Series string
+
+        // Force is used to allow a charm to be deployed onto a machine
+        // running an unsupported series.
+        Force bool
+
+        // DryRun is used to specify that the bundle shouldn't actually be
+        // deployed but just output the changes.
+        DryRun bool
+
+        ApplicationName string
+        ConfigOptions   common.ConfigFlag
+        ConstraintsStr  string
+        Constraints     constraints.Value
+        BindToSpaces    string
+
+        // TODO(axw) move this to UnitCommandBase once we support --storage
+        // on add-unit too.
+        //
+        // Storage is a map of storage constraints, keyed on the storage name
+        // defined in charm storage metadata.
+        Storage map[string]storage.Constraints
+
+        // BundleStorage maps application names to maps of storage constraints keyed on
+        // the storage name defined in that application's charm storage metadata.
+        BundleStorage map[string]map[string]storage.Constraints
+
+        // Resources is a map of resource name to filename to be uploaded on deploy.
+        Resources map[string]string
+
+        Bindings map[string]string
+        Steps    []DeployStep
+
+        // UseExisting machines when deploying the bundle.
+        UseExisting bool
+        // BundleMachines is a mapping for machines in the bundle to machines
+        // in the model.
+        BundleMachines map[string]string
+
+        // NewAPIRoot stores a function which returns a new API root.
+        NewAPIRoot func() (DeployAPI, error)                <==============
+
+        machineMap string
+        flagSet    *gnuflag.FlagSet
+}
+
+
+
+
+################################################################################################
+
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+c *DeployCommand
+apiRoot, err := c.NewAPIRoot()
+NewAPIRoot func() (DeployAPI, error)  
+defer apiRoot.Close()
+apiRoot.Deploy(args)
+apiRoot.BestFacadeVersion
+apiRoot.ServerVersion
+apiRoot.CharmInfo
+apiRoot.ModelUUID
+apiRoot.Resolve
+apiRoot.GetBundle
+apiRoot.GetAnnotations
+apiRoot.GetConfig
+apiRoot.GetConstraints
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+// apiRoot.GetConstraints
+./api/application/client.go:572:func (c *Client) GetConstraints(applications ...string) ([]constraints.Value, error) {
+
+
+
+// apiRoot.ModelUUID
+./api/application/client.go:55:func (c *Client) ModelUUID() string {
+
+
+
+// apiRoot.CharmInfo
+./api/charms/client.go:50:func (c *Client) CharmInfo(charmURL string) (*CharmInfo, error) {
+./apiserver/facades/client/charms/client.go:76:func (a *API) CharmInfo(args params.CharmURL) (params.CharmInfo, error) {
+
+
+
+// apiRoot.BestFacadeVersion
+./api/apiclient.go:1032:func (s *state) BestFacadeVersion(facade string) int {
+
+
+
+// apiRoot.GetConstraints
+./apiserver/facades/client/application/application.go:1172:func (api *APIv5) GetConstraints(args params.Entities) (params.ApplicationGetConstraintsResults, error) {
+./apiserver/facades/client/application/application.go:1543:func (api *APIv4) GetConstraints(args params.GetApplicationConstraints) (params.GetConstraintsResults, error) {
+./api/application/client.go:572:func (c *Client) GetConstraints(applications ...string) ([]constraints.Value, error) {
+
+
+
+// apiRoot.Resolve
+./cmd/juju/application/deploy.go:170:func (a *deployAPIAdapter) Resolve(cfg *config.Config, url *charm.URL) (
+
+
+// apiRoot.Deploy(args)
+./cmd/juju/application/deploy.go:159:func (a *deployAPIAdapter) Deploy(args application.DeployArgs) error {
+./api/application/client.go:114:func (c *Client) Deploy(args DeployArgs) error {
+
+
+
+// apiRoot.GetAnnotations
+./cmd/juju/application/deploy.go:187:func (a *deployAPIAdapter) GetAnnotations(tags []string) ([]apiparams.AnnotationsGetResult, error) {
+
+
+
+// apiRoot.GetBundle
+./cmd/juju/application/deploy_test.go:1747:func (f *fakeDeployAPI) GetBundle(url *charm.URL) (charm.Bundle, error) {
+
+
+
+// apiRoot.GetConfig
+./apiserver/facades/client/application/application.go:551:func (api *APIv5) GetConfig(args params.Entities) (params.ApplicationGetConfigResults, error) {
+./apiserver/facades/client/application/application.go:1540:func (u *APIv4) GetConfig(_, _ struct{}) {}
+./api/application/client.go:174:func (c *Client) GetConfig(appNames ...string) ([]map[string]interface{}, error) {
+
+
+
+
