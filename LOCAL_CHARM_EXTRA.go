@@ -2098,4 +2098,247 @@ apiRoot.GetConstraints
 
 
 
+#############################################################################################################################################
+
+
+
+./cmd/juju/application/deploy.go:159
+
+        "github.com/juju/juju/api/application"
+
+
+type applicationClient struct {
+        *application.Client
+}
+
+
+func (a *deployAPIAdapter) Deploy(args application.DeployArgs) error {
+        for i, p := range args.Placement {
+                if p.Scope == "model-uuid" {
+                        p.Scope = a.applicationClient.ModelUUID()
+                }
+                args.Placement[i] = p
+        }
+
+        return errors.Trace(a.applicationClient.Deploy(args))
+}
+
+
+-----------------------------------------------------------------------------------------------------
+juju/juju/api/application/client.go:28
+
+
+// Client allows access to the service API end point.
+type Client struct {
+        base.ClientFacade
+        st     base.APICallCloser
+        facade base.FacadeCaller
+}
+
+
+-----------------------------------------------------------------------------------------------------
+
+juju/juju/api/application/client.go:114:func (c *Client) Deploy(args DeployArgs) error {
+
+
+// Deploy obtains the charm, either locally or from the charm store, and deploys
+// it. Placement directives, if provided, specify the machine on which the charm
+// is deployed.
+func (c *Client) Deploy(args DeployArgs) error {
+        if len(args.AttachStorage) > 0 {
+                if args.NumUnits != 1 {
+                        return errors.New("cannot attach existing storage when more than one unit is requested")
+                }
+                if c.BestAPIVersion() < 5 {
+                        return errors.New("this juju controller does not support AttachStorage")
+                }
+        }
+        attachStorage := make([]string, len(args.AttachStorage))
+        for i, id := range args.AttachStorage {
+                if !names.IsValidStorage(id) {
+                        return errors.NotValidf("storage ID %q", id)
+                }
+                attachStorage[i] = names.NewStorageTag(id).String()
+        }
+        deployArgs := params.ApplicationsDeploy{
+                Applications: []params.ApplicationDeploy{{
+                        ApplicationName:  args.ApplicationName,
+                        Series:           args.Series,
+                        CharmURL:         args.CharmID.URL.String(),
+                        Channel:          string(args.CharmID.Channel),
+                        NumUnits:         args.NumUnits,
+                        ConfigYAML:       args.ConfigYAML,
+                        Config:           args.Config,
+                        Constraints:      args.Cons,
+                        Placement:        args.Placement,
+                        Storage:          args.Storage,
+                        AttachStorage:    attachStorage,
+                        EndpointBindings: args.EndpointBindings,
+                        Resources:        args.Resources,
+                }},
+        }
+        var results params.ErrorResults
+        var err error
+        err = c.facade.FacadeCall("Deploy", deployArgs, &results)
+        if err != nil {
+                return errors.Trace(err)
+        }
+        return errors.Trace(results.OneError())
+}
+
+
+
+============================================================================================
+
+
+./cmd/juju/application/deploy.go:159
+
+
+type deployAPIAdapter struct {
+        api.Connection
+        *apiClient
+        *charmsClient
+        *applicationClient
+        *modelConfigClient
+        *charmRepoClient
+        *charmstoreClient
+        *annotationsClient
+}
+
+type applicationClient struct {
+        *application.Client
+}
+
+
+func (a *deployAPIAdapter) Deploy(args application.DeployArgs) error {
+        for i, p := range args.Placement {
+                if p.Scope == "model-uuid" {
+                        p.Scope = a.applicationClient.ModelUUID()
+                }
+                args.Placement[i] = p
+        }
+
+        return errors.Trace(a.applicationClient.Deploy(args))
+}
+
+
+-----------------------------------------------------------------------------------------------------
+juju/juju/api/application/client.go:28
+
+
+// Client allows access to the service API end point.
+type Client struct {
+        base.ClientFacade
+        st     base.APICallCloser
+        facade base.FacadeCaller
+}
+
+
+-----------------------------------------------------------------------------------------------------
+
+juju/juju/api/application/client.go:114:func (c *Client) Deploy(args DeployArgs) error {
+
+
+// Deploy obtains the charm, either locally or from the charm store, and deploys
+// it. Placement directives, if provided, specify the machine on which the charm
+// is deployed.
+func (c *Client) Deploy(args DeployArgs) error {
+        if len(args.AttachStorage) > 0 {
+                if args.NumUnits != 1 {
+                        return errors.New("cannot attach existing storage when more than one unit is requested")
+                }
+                if c.BestAPIVersion() < 5 {
+                        return errors.New("this juju controller does not support AttachStorage")
+                }
+        }
+        attachStorage := make([]string, len(args.AttachStorage))
+        for i, id := range args.AttachStorage {
+                if !names.IsValidStorage(id) {
+                        return errors.NotValidf("storage ID %q", id)
+                }
+                attachStorage[i] = names.NewStorageTag(id).String()
+        }
+        deployArgs := params.ApplicationsDeploy{
+                Applications: []params.ApplicationDeploy{{
+                        ApplicationName:  args.ApplicationName,
+                        Series:           args.Series,
+                        CharmURL:         args.CharmID.URL.String(),
+                        Channel:          string(args.CharmID.Channel),
+                        NumUnits:         args.NumUnits,
+                        ConfigYAML:       args.ConfigYAML,
+                        Config:           args.Config,
+                        Constraints:      args.Cons,
+                        Placement:        args.Placement,
+                        Storage:          args.Storage,
+                        AttachStorage:    attachStorage,
+                        EndpointBindings: args.EndpointBindings,
+                        Resources:        args.Resources,
+                }},
+        }
+        var results params.ErrorResults
+        var err error
+        err = c.facade.FacadeCall("Deploy", deployArgs, &results)     <=======
+        if err != nil {
+                return errors.Trace(err)
+        }
+        return errors.Trace(results.OneError())
+}
+
+
+#############################################################################################################################################
+
+        "github.com/juju/juju/api/base"
+
+
+// Client allows access to the service API end point.
+type Client struct {
+        base.ClientFacade
+        st     base.APICallCloser
+        facade base.FacadeCaller
+}
+
+
+c *Client
+        err = c.facade.FacadeCall("Deploy", deployArgs, &results) 
+
+-----------------------------------------------------------------------------------------------------
+
+juju/juju/api/base/caller.go:95
+
+
+// FacadeCaller is a wrapper for the common paradigm that a given client just
+// wants to make calls on a facade using the best known version of the API. And
+// without dealing with an id parameter.
+type FacadeCaller interface {
+        // FacadeCall will place a request against the API using the requested
+        // Facade and the best version that the API server supports that is
+        // also known to the client.
+        FacadeCall(request string, params, response interface{}) error
+
+        // Name returns the facade name.
+        Name() string
+
+        // BestAPIVersion returns the API version that we were able to
+        // determine is supported by both the client and the API Server
+        BestAPIVersion() int
+
+        // RawAPICaller returns the wrapped APICaller. This can be used if you need
+        // to switch what Facade you are calling (such as Facades that return
+        // Watchers and then need to use the Watcher facade)
+        RawAPICaller() APICaller
+}
+
+
+-----------------------------------------------------------------------------------------------------
+
+juju/juju/api/base/caller.go
+
+// FacadeCall will place a request against the API using the requested
+// Facade and the best version that the API server supports that is
+// also known to the client. (id is always passed as the empty string.)
+func (fc facadeCaller) FacadeCall(request string, params, response interface{}) error {
+        return fc.caller.APICall(
+                fc.facadeName, fc.bestVersion, "",
+                request, params, response)
+}
 
