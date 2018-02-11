@@ -1,3 +1,44 @@
+// Package main is special. It defines a stand alone executable program, not a library. Within
+// package main the function main is also special it’s where execut ion of the program begins.
+// Whatever main does is what the program does.
+
+
+juju/juju/cmd/juju/main.go
+
+
+package main
+
+import (
+        "os"
+
+        "github.com/juju/cmd"
+        "github.com/juju/loggo"
+
+        "github.com/juju/juju/cmd/juju/commands"
+        components "github.com/juju/juju/component/all"
+        // Import the providers.
+        _ "github.com/juju/juju/provider/all"
+)
+
+var log = loggo.GetLogger("juju.cmd.juju")
+
+func init() {
+        if err := components.RegisterForClient(); err != nil {
+                log.Criticalf("unable to register client components: %v", err)
+                os.Exit(1)
+        }
+}
+
+func main() {
+        _, err := loggo.ReplaceDefaultWriter(cmd.NewWarningWriter(os.Stderr))
+        if err != nil {
+                panic(err)
+        }
+        os.Exit(commands.Main(os.Args))
+}
+
+
+###############################################################################################
 
 
 juju/juju/juju/osenv/home.go:45
@@ -2341,4 +2382,6 @@ func (fc facadeCaller) FacadeCall(request string, params, response interface{}) 
                 fc.facadeName, fc.bestVersion, "",
                 request, params, response)
 }
+
+
 
